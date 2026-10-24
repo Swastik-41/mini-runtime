@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="{{CSRF_TOKEN}}">
+<title>mini-runtime dashboard</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>mini-runtime</h1>
+    <p class="sub">Namespaces, cgroups v2 and OverlayFS copy-on-write, live</p>
+  </div>
+  <div class="topbar-right">
+    <p class="sub" id="runtime-dir"></p>
+    <span id="conn" class="conn" role="status" aria-live="polite">Connecting…</span>
+  </div>
+</header>
+
+<div id="restart-banner" class="banner" role="alert" hidden>
+  The dashboard server was restarted. Terminals from before the restart are gone, and buttons need a fresh page.
+  <button id="reload">Reload page</button>
+</div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <section class="panel" aria-labelledby="run-title">
+      <h2 id="run-title">Run a container</h2>
+      <form id="run-form" autocomplete="off" novalidate>
+        <label>Name <input name="name" required pattern="[A-Za-z0-9_\-]{1,64}" maxlength="64" placeholder="demo"></label>
+        <label>Image <select name="image" id="image-select"></select></label>
+        <div class="row3">
+          <label>Memory <input name="memory" value="100M" pattern="[0-9]{1,10}[KMGkmg]"></label>
+          <label>CPU % <input name="cpu" type="number" min="1" max="100" value="50"></label>
+          <label>PIDs <input name="pids" type="number" min="1" max="32768" value="64"></label>
+        </div>
+        <label>Command <input name="command" maxlength="4096" placeholder="/bin/sh (interactive shell)"></label>
+        <label class="check"><input type="checkbox" name="net"> Network to the host (veth)</label>
+        <div class="presets" role="group" aria-label="Demo presets">
+          <span class="sub">Demos:</span>
+          <button type="button" data-preset="oom">Memory OOM</button>
+          <button type="button" data-preset="cpu">CPU cap</button>
+          <button type="button" data-preset="fork">Fork limit</button>
+          <button type="button" data-preset="cow">Copy-on-write</button>
+        </div>
+        <button type="submit" class="primary">Run</button>
+        <p class="error" id="run-error" role="alert"></p>
+      </form>
+    </section>
+  </aside>
+
+  <main class="main">
+    <section class="panel" aria-labelledby="containers-title">
+      <div class="panel-head">
+        <h2 id="containers-title">Containers</h2>
+        <span class="sub" id="updated"></span>
+      </div>
+      <div class="toolbar">
+        <label class="inline">Search <input id="search" type="search" placeholder="Name or image"></label>
+        <label class="inline">Show
+          <select id="filter">
+            <option value="all">All</option>
+            <option value="RUNNING">Running</option>
+            <option value="STOPPED">Stopped</option>
+            <option value="UNKNOWN">Unknown</option>
+            <option value="ATTACHED">Terminal here</option>
+          </select>
+        </label>
+        <label class="inline">Sort by
+          <select id="sort">
+            <option value="name">Name</option>
+            <option value="state">Status</option>
+            <option value="image">Image</option>
+            <option value="memory">Memory limit</option>
+            <option value="cpu">CPU cap</option>
+          </select>
+        </label>
+      </div>
+      <div class="table-wrap">
+        <table class="containers">
+          <thead><tr>
+            <th scope="col">Name</th><th scope="col">Status</th><th scope="col">Terminal</th>
+            <th scope="col">Image</th><th scope="col">Memory</th><th scope="col">CPU</th>
+            <th scope="col">PIDs</th><th scope="col"><span class="sr-only">Actions</span></th>
+          </tr></thead>
+          <tbody id="container-rows">
+            <tr class="skeleton"><td colspan="8"><span></span></td></tr>
+            <tr class="skeleton"><td colspan="8"><span></span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p id="containers-empty" class="muted empty-note" hidden></p>
+    </section>
+
+    <section id="empty" class="panel empty">
+      <h2>No container selected</h2>
+      <p>Run a container, or pick one in the table, to see its limits, live usage, terminal and file changes.</p>
+    </section>
+
+    <section id="detail" hidden aria-labelledby="d-name">
+      <div class="detail-head">
+        <div>
+          <h2 id="d-name"></h2>
+          <p class="sub" id="d-meta"></p>
+          <div class="badges">
+            <span id="b-state" class="pill"></span>
+            <span id="b-terminal" class="pill"></span>
+            <span id="b-metrics" class="pill"></span>
+          </div>
+        </div>
+        <div class="actions">
+          <button id="d-start" class="go">Start</button>
+          <button id="d-edit">Edit and run</button>
+          <button id="d-stop">Stop</button>
+          <button id="d-delete" class="danger">Delete</button>
+        </div>
+      </div>
+      <p id="d-notice" class="notice" hidden></p>
+
+      <div class="tiles">
+        <div class="tile"><span class="tile-label">Memory</span><span class="tile-value" id="t-mem">-</span><span class="tile-note" id="t-mem-note"></span></div>
+        <div class="tile"><span class="tile-label">CPU (% of one CPU core)</span><span class="tile-value" id="t-cpu">-</span><span class="tile-note" id="t-cpu-note"></span></div>
+        <div class="tile"><span class="tile-label">Processes</span><span class="tile-value" id="t-pids">-</span><span class="tile-note" id="t-pids-note"></span></div>
+        <div class="tile"><span class="tile-label">OOM kills</span><span class="tile-value" id="t-oom">-</span><span class="tile-note">kernel memory.events</span></div>
+      </div>
+      <p class="sub chart-note"><span id="sample-age"></span> <span id="chart-mode">Live samples only: the last 60 seconds, not saved.</span></p>
+
+      <div class="charts">
+        <figure class="panel chart" id="chart-mem"></figure>
+        <figure class="panel chart" id="chart-cpu"></figure>
+        <figure class="panel chart" id="chart-pids"></figure>
+      </div>
+
+      <div class="split">
+        <section class="panel term-panel" id="term-panel" aria-label="Terminal">
+          <div class="panel-head">
+            <h3>Terminal <span class="sub" id="term-name"></span></h3>
+            <div class="term-tools">
+              <span class="sub" id="term-note"></span>
+              <button id="term-clear" title="Clear the screen">Clear</button>
+              <button id="term-copy" title="Copy the terminal output">Copy</button>
+              <button id="term-full" title="Fill the window (Esc outside the terminal, or this button, to leave)" aria-pressed="false">Fullscreen</button>
+              <button id="term-stop" class="danger">Stop</button>
+            </div>
+          </div>
+          <div id="terminal"></div>
+        </section>
+
+        <section class="panel" aria-label="Copy-on-write changes">
+          <div class="panel-head">
+            <h3>Copy-on-write changes</h3>
+            <button id="diff-refresh">Refresh</button>
+          </div>
+          <div id="diff-size" class="diff-size"></div>
+          <ul id="diff-list" class="diff-list"></ul>
+        </section>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="events-title">
+      <div class="panel-head"><h3 id="events-title">Event log</h3></div>
+      <div class="table-wrap">
+        <table class="events">
+          <thead><tr><th scope="col">Time</th><th scope="col">Container</th><th scope="col">Event</th></tr></thead>
+          <tbody id="event-rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
